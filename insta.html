@@ -16,9 +16,9 @@
         input[type="range"] {
             -webkit-appearance: none;
             width: 100%;
-            height: 4px;
+            height: 6px; /* Slightly thicker for better visibility */
             background: #333;
-            border-radius: 2px;
+            border-radius: 3px;
             outline: none;
         }
         input[type="range"]::-webkit-slider-thumb {
@@ -30,7 +30,25 @@
             box-shadow: 0 0 10px rgba(255,255,255,0.8);
             cursor: pointer;
             transition: transform 0.1s;
+            margin-top: -5px; /* Alignment fix */
         }
+        /* For Firefox */
+        input[type="range"]::-moz-range-thumb {
+            width: 16px;
+            height: 16px;
+            border: none;
+            border-radius: 50%;
+            background: #fff;
+            box-shadow: 0 0 10px rgba(255,255,255,0.8);
+            cursor: pointer;
+            transition: transform 0.1s;
+        }
+        
+        input[type="range"]::-webkit-slider-runnable-track {
+            height: 6px;
+            border-radius: 3px;
+        }
+        
         input[type="range"]::-webkit-slider-thumb:hover {
             transform: scale(1.3);
             background: #ff5500; /* Accent color on hover */
@@ -128,15 +146,16 @@
             uniform float u_speed;
             uniform float u_frequency;
             uniform float u_intensity;
-            uniform vec2 u_center; // 0.0~1.0 UV coordinate
+            uniform float u_ellipse; 
+            uniform vec2 u_center; 
             uniform float u_aspect;
 
             // Appearance Params
             uniform bool u_isThermal;
-            uniform bool u_isGrayscale; // B&W Toggle
+            uniform bool u_isGrayscale; 
             uniform float u_hue;
-            uniform float u_threshold; // Silhouette cutoff
-            uniform float u_smoothness; // Edge softness / Bands
+            uniform float u_threshold; 
+            uniform float u_smoothness; // Now controls Blur Radius
 
             varying vec2 v_texCoord;
 
@@ -148,14 +167,12 @@
             }
 
             // 2. Thermal Gradient Map
-            // value 0.0 (Shadow) -> value 1.0 (Highlight)
             vec3 getThermalColor(float value) {
-                // Defines the "Heatmap" look
-                vec3 c1 = vec3(0.05, 0.0, 0.2);  // Deep Dark Purple (Shadows)
-                vec3 c2 = vec3(0.0, 0.0, 1.0);   // Blue (Mid-Dark)
-                vec3 c3 = vec3(0.0, 1.0, 1.0);   // Cyan (Mid)
-                vec3 c4 = vec3(1.0, 1.0, 0.0);   // Yellow (High)
-                vec3 c5 = vec3(1.0, 0.2, 0.0);   // Red-Orange (Peak)
+                vec3 c1 = vec3(0.05, 0.0, 0.2);  // Deep Dark Purple
+                vec3 c2 = vec3(0.0, 0.0, 1.0);   // Blue
+                vec3 c3 = vec3(0.0, 1.0, 1.0);   // Cyan
+                vec3 c4 = vec3(1.0, 1.0, 0.0);   // Yellow
+                vec3 c5 = vec3(1.0, 0.2, 0.0);   // Red-Orange
 
                 vec3 col;
                 if(value < 0.25) col = mix(c1, c2, value * 4.0);
@@ -170,36 +187,52 @@
                 vec2 uv = v_texCoord;
                 
                 // --- Step 1: Ripple Distortion (Reverse/Inwards) ---
-                
-                // Correct coordinates to center based on aspect ratio
                 vec2 distVec = uv - u_center;
                 distVec.x *= u_aspect; 
+                distVec.y *= u_ellipse; 
+                
                 float dist = length(distVec);
-
-                // 'u_time' addition makes it flow inwards (Reverse)
                 float wave = sin(dist * u_frequency + (u_time * u_speed)) * u_intensity;
                 
-                // Apply distortion
                 vec2 distortion = normalize(distVec) * wave * 0.02; 
                 vec2 distortedUV = uv + distortion;
 
-                // --- Step 2: Fetch Original Color ---
-                vec4 texColor = texture2D(u_image, clamp(distortedUV, 0.0, 1.0));
-                vec3 finalColor = texColor.rgb;
+                // --- Step 2: Fetch Color (With Gaussian-like Blur) ---
+                vec3 finalColor;
+                
+                // Simple 5x5 Box Blur implementation
+                // This mimics Gaussian blur by averaging neighbors
+                if (u_smoothness > 0.0) {
+                    vec3 colSum = vec3(0.0);
+                    float total = 0.0;
+                    float radius = u_smoothness * 0.02; // Scale blur strength
+
+                    // Optimized 5x5 kernel loop
+                    for (float x = -2.0; x <= 2.0; x += 1.0) {
+                        for (float y = -2.0; y <= 2.0; y += 1.0) {
+                            vec2 offset = vec2(x, y) * radius;
+                            colSum += texture2D(u_image, clamp(distortedUV + offset, 0.0, 1.0)).rgb;
+                            total += 1.0;
+                        }
+                    }
+                    finalColor = colSum / total;
+                } else {
+                    finalColor = texture2D(u_image, clamp(distortedUV, 0.0, 1.0)).rgb;
+                }
+
 
                 // --- Step 3: Silhouette & Thermal Mapping ---
                 if (u_isThermal) {
                     // Convert to Grayscale (Luminance)
                     float lum = dot(finalColor, vec3(0.299, 0.587, 0.114));
                     
-                    // --- Simplification & Posterization ---
+                    // --- Contrast & Threshold ---
                     float contrast = 1.3; 
                     float val = (lum - 0.5) * contrast + 0.5 + (u_threshold - 0.5);
                     val = clamp(val, 0.0, 1.0);
 
-                    // Banding logic from previous update
-                    float bands = 3.0 + (u_smoothness * 17.0); 
-                    val = floor(val * bands) / (bands - 1.0);
+                    // REMOVED: Banding logic
+                    // The blur above (Step 2) handles the "smoothness" now
                     
                     finalColor = getThermalColor(val);
                 }
@@ -226,14 +259,15 @@
             // Core Parameters
             const [params, setParams] = useState({
                 speed: 30,
-                frequency: 200,    // Default Higher frequency for thinner waves
+                frequency: 200,
                 intensity: 30,
-                hue: 0,            // 0 ~ 6.28 (Radians)
+                ellipse: 1.5,
+                hue: 0,
                 isThermal: true,
-                isGrayscale: false, // B&W State
-                threshold: 0.4,    // Silhouette Cutoff
-                smoothness: 0.2,   // Band Count
-                anchor: 'bottom-center' // Position key
+                isGrayscale: false,
+                threshold: 0.4,
+                smoothness: 0.0,   // Default 0 for no blur
+                anchor: 'bottom-center'
             });
 
             const getAnchorCoords = (key) => {
@@ -365,6 +399,7 @@
                 gl.uniform1f(gl.getUniformLocation(prog, "u_speed"), params.speed * 0.1);
                 gl.uniform1f(gl.getUniformLocation(prog, "u_frequency"), params.frequency);
                 gl.uniform1f(gl.getUniformLocation(prog, "u_intensity"), params.intensity * 0.01);
+                gl.uniform1f(gl.getUniformLocation(prog, "u_ellipse"), params.ellipse);
                 gl.uniform1i(gl.getUniformLocation(prog, "u_isThermal"), params.isThermal);
                 gl.uniform1i(gl.getUniformLocation(prog, "u_isGrayscale"), params.isGrayscale);
                 gl.uniform1f(gl.getUniformLocation(prog, "u_aspect"), targetW / targetH);
@@ -469,7 +504,7 @@
                             <h2 className="text-xs font-bold text-orange-500 tracking-[0.2em] flex items-center gap-2">
                                 <IconSliders size={12}/> CONTROL PANEL
                             </h2>
-                            <button onClick={() => setParams(p => ({...p, hue: 0, speed: 30, frequency: 200, intensity: 30, threshold: 0.4, smoothness: 0.2, isGrayscale: false}))} className="text-xs text-gray-600 hover:text-white transition-colors">
+                            <button onClick={() => setParams(p => ({...p, hue: 0, speed: 30, frequency: 200, intensity: 30, ellipse: 1.5, threshold: 0.4, smoothness: 0.0, isGrayscale: false}))} className="text-xs text-gray-600 hover:text-white transition-colors">
                                 <IconRefresh size={12}/>
                             </button>
                         </div>
@@ -508,11 +543,11 @@
                                     {/* Blur/Smoothness Slider */}
                                     <div className="space-y-2">
                                         <div className="flex justify-between text-[10px] text-gray-500 font-mono">
-                                            <span>SILHOUETTE BLUR (DETAIL)</span>
+                                            <span>SILHOUETTE BLUR (GAUSSIAN)</span>
                                             <span>{(params.smoothness * 100).toFixed(0)}%</span>
                                         </div>
                                         <input 
-                                            type="range" min="1" max="100" 
+                                            type="range" min="0" max="100" 
                                             value={params.smoothness * 100} 
                                             onChange={(e) => setParams({...params, smoothness: Number(e.target.value) / 100})}
                                             className="accent-white"
@@ -525,16 +560,15 @@
                                             <span>GLOBAL HUE</span>
                                             <span>{params.hue}°</span>
                                         </div>
-                                        <div className="relative h-4 rounded-full overflow-hidden">
-                                            <div className="absolute inset-0 bg-gradient-to-r from-red-500 via-green-500 to-blue-500 opacity-40"></div>
-                                            <input 
-                                                type="range" min="0" max="360" 
-                                                value={params.hue} 
-                                                onChange={(e) => setParams({...params, hue: Number(e.target.value)})}
-                                                className="absolute inset-0 opacity-0 cursor-pointer"
-                                            />
-                                            <div className="absolute top-0 bottom-0 w-1 bg-white pointer-events-none" style={{left: `${(params.hue / 360) * 100}%`}}></div>
-                                        </div>
+                                        <input 
+                                            type="range" min="0" max="360" 
+                                            value={params.hue} 
+                                            onChange={(e) => setParams({...params, hue: Number(e.target.value)})}
+                                            className="w-full"
+                                            style={{
+                                                background: 'linear-gradient(to right, #f87171, #fbbf24, #34d399, #60a5fa, #818cf8, #c084fc, #f87171)'
+                                            }}
+                                        />
                                     </div>
                                 </div>
                             </div>
@@ -591,6 +625,22 @@
                                         />
                                     </div>
                                 ))}
+
+                                {/* Ellipse Slider */}
+                                <div className="space-y-2">
+                                    <div className="flex justify-between text-[10px] text-gray-500 font-mono uppercase">
+                                        <span>ELLIPSE FACTOR</span>
+                                        <span>{params.ellipse.toFixed(1)}</span>
+                                    </div>
+                                    <input 
+                                        type="range" 
+                                        min="0.5" 
+                                        max="3.0" 
+                                        step="0.1"
+                                        value={params.ellipse} 
+                                        onChange={(e) => setParams({...params, ellipse: Number(e.target.value)})}
+                                    />
+                                </div>
                             </div>
                         </div>
 
